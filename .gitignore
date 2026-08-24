@@ -1,0 +1,34 @@
+# Secrets and credentials — NEVER commit these
+.env
+credentials.json
+gmail_oauth_client.json
+gmail_token.json
+*token*.json
+*service-account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Streamlit
+.streamlit/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Claude Code local config & notes
+.claude/
+CLAUDE.md

@@ -1,0 +1,161 @@
+"""
+pages/02_mileage_tracker.py — Mileage Tracker
+
+Log start/end odometer readings. Miles and the IRS deduction are calculated
+automatically. All trips are stored in the Mileage tab for Schedule E / tax prep.
+"""
+
+import datetime
+import streamlit as st
+from utils.auth_gate import require_auth
+import pandas as pd
+
+from sheets.mileage import add_mileage
+from utils.cache import safe_get_mileage, show_fetch_error
+from utils.formatting import format_currency, format_miles, format_date
+from config import (
+    PROPERTIES,
+    MILEAGE_PURPOSES,
+    VEHICLES,
+    IRS_MILEAGE_RATE_CURRENT,
+    DEFAULT_MILEAGE_PROPERTY,
+    default_property_index,
+)
+
+require_auth()
+
+st.set_page_config(page_title="Mileage Tracker", page_icon="🚗", layout="centered")
+st.title("🚗 Mileage Tracker")
+st.caption(f"IRS rate: ${IRS_MILEAGE_RATE_CURRENT}/mile (2026)")
+
+# ---------------------------------------------------------------------------
+# Log Trip form
+# ---------------------------------------------------------------------------
+st.subheader("Log a Trip")
+
+entry_mode = st.radio(
+    "Entry mode",
+    options=["Odometer", "Miles only"],
+    horizontal=True,
+    help="Odometer is most accurate. 'Miles only' is for backfilling trips "
+         "where you didn't capture the odometer reading.",
+)
+
+with st.form("mileage_form", clear_on_submit=True):
+    prop = st.selectbox(
+        "Property (destination) *",
+        PROPERTIES,
+        index=default_property_index(DEFAULT_MILEAGE_PROPERTY),
+    )
+    vehicle = st.selectbox("Vehicle *", VEHICLES)
+    purpose = st.selectbox("Purpose *", MILEAGE_PURPOSES)
+    trip_date = st.date_input("Date", value=datetime.date.today())
+
+    start_odo = 0.0
+    end_odo = 0.0
+    miles_direct = 0.0
+
+    if entry_mode == "Odometer":
+        col1, col2 = st.columns(2)
+        with col1:
+            start_odo = st.number_input(
+                "Start Odometer (miles)", min_value=0.0, step=0.1, format="%.1f"
+            )
+        with col2:
+            end_odo = st.number_input(
+                "End Odometer (miles)", min_value=0.0, step=0.1, format="%.1f"
+            )
+        if end_odo > start_odo:
+            preview_miles = round(end_odo - start_odo, 1)
+            preview_ded = round(preview_miles * IRS_MILEAGE_RATE_CURRENT, 2)
+            st.info(f"**{preview_miles} miles** → **{format_currency(preview_ded)} deduction**")
+    else:
+        miles_direct = st.number_input(
+            "Miles *",
+            min_value=0.0, step=0.1, format="%.1f",
+            help="Enter the trip distance directly. Odometer columns will be left blank.",
+        )
+        if miles_direct > 0:
+            preview_ded = round(miles_direct * IRS_MILEAGE_RATE_CURRENT, 2)
+            st.info(f"**{miles_direct} miles** → **{format_currency(preview_ded)} deduction**")
+
+    notes = st.text_input("Notes (optional)", placeholder="e.g. Picked up supplies at Home Depot")
+
+    submitted = st.form_submit_button("Save Trip", use_container_width=True)
+    if submitted:
+        errors = []
+        if entry_mode == "Odometer":
+            if end_odo <= start_odo:
+                errors.append("End odometer must be greater than start odometer.")
+        else:
+            if miles_direct <= 0:
+                errors.append("Miles must be greater than 0.")
+        if errors:
+            for e in errors:
+                st.error(e)
+        else:
+            try:
+                add_mileage(
+                    date=trip_date,
+                    property_name=prop,
+                    purpose=purpose,
+                    start_odometer=start_odo,
+                    end_odometer=end_odo,
+                    miles=miles_direct,
+                    notes=notes.strip(),
+                    vehicle=vehicle,
+                )
+                final_miles = round(end_odo - start_odo, 1) if entry_mode == "Odometer" else round(miles_direct, 1)
+                st.success(
+                    f"Trip saved! {final_miles} miles → "
+                    f"{format_currency(round(final_miles * IRS_MILEAGE_RATE_CURRENT, 2))} deduction"
+                )
+            except Exception as e:
+                st.error(f"Failed to save: {e}")
+
+# ---------------------------------------------------------------------------
+# History
+# ---------------------------------------------------------------------------
+st.markdown("---")
+col_title, col_refresh = st.columns([4, 1])
+col_title.subheader("Trip History")
+if col_refresh.button("Refresh", use_container_width=True):
+    from sheets.client import get_all_records
+    get_all_records.clear()
+    st.rerun()
+
+df, err = safe_get_mileage()
+show_fetch_error(err)
+
+if df is None or df.empty:
+    st.info("No trips logged yet.", icon="ℹ️")
+    st.stop()
+
+# Filter by property
+prop_filter = st.selectbox("Filter by property", ["All"] + PROPERTIES, key="ml_prop")
+if prop_filter != "All":
+    df = df[df["property"] == prop_filter]
+
+if df.empty:
+    st.info(f"No trips for {prop_filter}.")
+    st.stop()
+
+# Summary totals
+total_miles = pd.to_numeric(df["miles"], errors="coerce").sum()
+total_deduction = pd.to_numeric(df["deduction_amount"], errors="coerce").sum()
+
+c1, c2 = st.columns(2)
+c1.metric("Total Miles", f"{total_miles:,.1f}")
+c2.metric("Total Deduction", format_currency(total_deduction))
+
+# Display table — vehicle column is optional (may not exist in older rows)
+wanted = ["date", "property", "vehicle", "purpose", "miles", "deduction_amount", "notes"]
+present = [c for c in wanted if c in df.columns]
+display_df = df[present].copy()
+display_df.columns = [c.replace("_", " ").title() for c in present]
+if "Deduction Amount" in display_df.columns:
+    display_df.rename(columns={"Deduction Amount": "Deduction"}, inplace=True)
+    display_df["Deduction"] = display_df["Deduction"].apply(
+        lambda x: format_currency(x) if x else ""
+    )
+st.dataframe(display_df, use_container_width=True, hide_index=True)
